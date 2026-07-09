@@ -1,0 +1,10 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "go.goroot": "/home/mikulove/anaconda3/envs/tinykv_env",
+    "go.alternateTools": {
+        "go": "/home/mikulove/anaconda3/envs/tinykv_env/bin/go",
+        "gopls": "/home/mikulove/go/bin/gopls",
+        "dlv": "/home/mikulove/go/bin/dlv"
+    }
+}
