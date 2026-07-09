@@ -10,6 +10,7 @@ import (
 // communicate with other nodes and all data is stored locally.
 type StandAloneStorage struct {
 	// Your Data Here (1).
+
 }
 
 func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
