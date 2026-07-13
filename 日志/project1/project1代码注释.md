@@ -1,6 +1,6 @@
 # Project1 代码注释
 
-# Standalone_storage
+## Standalone_storage
 
 ## （1）为什么要`struct`存 `*badger.DB`？
 
@@ -121,11 +121,11 @@ RawGet("default", "foo")
 
 三层各司其职：
 
-| 层       | 谁                                                     | 做什么                                                  |
-| -------- | ------------------------------------------------------ | ------------------------------------------------------- |
-| 快照创建 | `Reader()` 调 `s.db.NewTransaction(false)`         | 拍快照，包一层外壳                                      |
-| 列族翻译 | `engine_util`（`GetCFFromTxn`、`NewCFIterator`） | `"default"+"foo"` → `"default_foo"`，拼前缀/去前缀 |
-| 磁盘存储 | `badger`（`txn.Get`）                              | 真正的数据持久化和检索                                  |
+| 层 | 谁 | 做什么 |
+| --- | --- | --- |
+| 快照创建 | `Reader()` → `s.db.NewTransaction(false)` | 拍快照，包一层外壳 |
+| 列族翻译 | `engine_util`（GetCFFromTxn、NewCFIterator） | `"default"+"foo"` → `"default_foo"` |
+| 磁盘存储 | `badger`（`txn.Get`） | 真正的数据持久化和检索 |
 
 ### Reader 需要一个"壳"：StandaloneReader
 
@@ -133,11 +133,11 @@ RawGet("default", "foo")
 
 所以自定义一个 struct 挂上三个方法，全部内部走 engine_util：
 
-| 方法               | 内部调用                                   | 作用                |
-| ------------------ | ------------------------------------------ | ------------------- |
-| `GetCF(cf, key)` | `engine_util.GetCFFromTxn(txn, cf, key)` | 单点查询            |
-| `IterCF(cf)`     | `engine_util.NewCFIterator(cf, txn)`     | 范围遍历（Scan 用） |
-| `Close()`        | `txn.Discard()`                          | 释放快照资源        |
+| 方法 | 内部调用 | 作用 |
+| --- | --- | --- |
+| `GetCF(cf, key)` | `engine_util.GetCFFromTxn(txn, cf, key)` | 单点查询 |
+| `IterCF(cf)` | `engine_util.NewCFIterator(cf, txn)` | 范围遍历（Scan 用） |
+| `Close()` | `txn.Discard()` | 释放快照资源 |
 
 ### 为什么不直接返回 `*badger.Txn`？
 
@@ -212,15 +212,15 @@ for _, m := range batch {                      // _ = 忽略索引，m = 当前 
 
 Reader 额外包一层，不是偶然，而是一条因果链：
 
-**1. 读操作需要快照一致性 → 事务必须长命**
+#### 1. 读操作需要快照一致性 → 事务必须长命
 
 `GetCF` 和 `IterCF` 可能被多次调用（同一请求里读多个 key，或者 Scan 遍历），必须看到**同一个快照**的数据。如果每次读都开新事务，两个 `GetCF` 可能读到不同版本，Scan 遍历到一半也可能被写入打断。
 
-**2. 事务长命 → 不能用 engine_util 自动管理**
+#### 2. 事务长命 → 不能用 engine_util 自动管理
 
 `engine_util.GetCF(db, cf, key)` 内部自己开一个 `db.View`，读完就关。这种事务瞬生瞬灭的模式没法共享快照。只能自己手动 `NewTransaction(false)` 创建 txn，用 `GetCFFromTxn`（你传 txn 进去），最后手动 `Discard`。
 
-**3. 手动管理 txn + 列族隔离 → 需要 StandaloneReader**
+#### 3. 手动管理 txn + 列族隔离 → 需要 StandaloneReader
 
 裸的 `*badger.Txn` 不认识列族前缀，如果直接暴露给 raw_api，上层就得自己拼 `"default_foo"`，越了层。所以需要一个壳：对内管理 txn 生命周期（创建/释放），对外提供带 CF 的接口（`GetCF`/`IterCF`/`Close`），内部走 engine_util 翻译列族。
 
@@ -230,14 +230,14 @@ Reader 额外包一层，不是偶然，而是一条因果链：
 - `engine_util.PutCF` 内部 `db.Update` 自动开事务 → 写入 → 提交，一气呵成
 - 不需要手动管事务生命周期，也就不需要中间层
 
-| 对比项       | Write                | Reader                           |
-| ------------ | -------------------- | -------------------------------- |
-| 一致性要求   | 无（P1 简化）        | 快照一致性（多次读共享同一视图） |
-| 事务创建     | engine_util 内部自动 | 你手动`NewTransaction`         |
-| 事务生命周期 | 单次调用即结束       | 跨多次调用                       |
-| txn 归属     | engine_util 管       | 你管（包在 StandaloneReader 里） |
+| 对比项 | Write | Reader |
+| --- | --- | --- |
+| 一致性要求 | 无（P1 简化） | 快照一致性（多次读共享同一视图） |
+| 事务创建 | engine_util 内部自动 | 你手动 `NewTransaction` |
+| 事务生命周期 | 单次调用即结束 | 跨多次调用 |
+| txn 归属 | engine_util 管 | 你管（包在 StandaloneReader 里） |
 
-# Raw_api
+## Raw_api
 
 ### (1) RawGet：读一个键
 
@@ -262,15 +262,15 @@ func (server *Server) RawGet(_ context.Context, req *kvrpcpb.RawGetRequest) (*kv
 
 **kvrpcpb.RawGetResponse**：这是 proto 文件自动生成的 struct，有 7 个字段但你只需填 2 个：
 
-| 字段         | 填的值           | 含义                            |
-| ------------ | ---------------- | ------------------------------- |
-| `Value`    | `val`          | 读到的值（nil = 不存在）        |
-| `NotFound` | `val == nil`   | 告诉客户端键存不存在            |
-| 其余 5 个    | 不填（自动零值） | RegionError、Error 等 P1 用不上 |
+| 字段 | 填的值 | 含义 |
+| --- | --- | --- |
+| `Value` | `val` | 读到的值（nil = 不存在） |
+| `NotFound` | `val == nil` | 告诉客户端键存不存在 |
+| 其余 5 个 | 不填（自动零值） | RegionError、Error 等（P1 不管） |
 
 ### (2) RawPut：写一个键值对（RawDelete同理）
 
-**Modify 构造解析**
+#### Modify 构造解析
 
 ```go
 storage.Modify{                      // 外层：包装盒
@@ -286,7 +286,7 @@ storage.Modify{                      // 外层：包装盒
 - `Data: storage.Put{...}` — 创建一个 Put 实例，整体赋给 Data。interface{} 接受任何类型
 - 字段名与 Modify 并列（Key/Value/Cf）是**错误写法**；正确写法是字段**包在 Put 里面**
 
-注意	`storage.Modify{...}`的storage是包名，而`error := server.storage.Write(...)`的storage是成员名。
+注意 `storage.Modify{...}` 的 storage 是包名，而 `server.storage.Write(...)` 的 storage 是成员名。
 
 `RawPutResponse` 的 proto 定义里没有业务字段，所以空着就行。`RawDelete` 同理。
 

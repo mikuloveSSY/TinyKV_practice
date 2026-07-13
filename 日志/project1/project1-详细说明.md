@@ -198,13 +198,13 @@ gRPC 框架（自动处理）
 
 这个文件实现存储引擎，是 badger 的"外壳"。
 
-| 位置                             | 做什么                                                                                                                          | 通俗解释                                           |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| **struct 字段**            | 添加 badger 数据库实例和配置等成员变量                                                                                          | 给结构体加上"大脑"，让它能记住 badger 实例         |
-| **NewStandAloneStorage()** | 打开（或创建）badger 数据库，返回一个 StandAloneStorage 实例                                                                    | 构造函数，相当于"开机"前的准备工作                 |
-| **Start()**                | 可能需要做一些初始化（P1 中可能不需要额外操作）                                                                                 | 启动服务                                           |
-| **Stop()**                 | 调用 badger 的 Close 方法，关闭数据库                                                                                           | 关闭服务，释放资源                                 |
-| **Write()**                | 遍历 batch 里的每个 Modify，判断是 Put 还是 Delete，调用 engine_util 的`PutCF` / `DeleteCF` 写入 badger                     | 把一批写操作落地到磁盘                             |
+| 位置                             | 做什么                                                                                                                                                                                                                             | 通俗解释                                           |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| **struct 字段**            | 添加 badger 数据库实例和配置等成员变量                                                                                                                                                                                             | 给结构体加上"大脑"，让它能记住 badger 实例         |
+| **NewStandAloneStorage()** | 打开（或创建）badger 数据库，返回一个 StandAloneStorage 实例                                                                                                                                                                       | 构造函数，相当于"开机"前的准备工作                 |
+| **Start()**                | 可能需要做一些初始化（P1 中可能不需要额外操作）                                                                                                                                                                                    | 启动服务                                           |
+| **Stop()**                 | 调用 badger 的 Close 方法，关闭数据库                                                                                                                                                                                              | 关闭服务，释放资源                                 |
+| **Write()**                | 遍历 batch 里的每个 Modify，判断是 Put 还是 Delete，调用 engine_util 的`PutCF` / `DeleteCF` 写入 badger                                                                                                                        | 把一批写操作落地到磁盘                             |
 | **Reader()**               | 用`badger.Txn` 创建一个事务，基于这个事务返回一个 reader 对象。这个 reader 需要实现 `GetCF`、`IterCF`、`Close` 三个方法。**当前不需要考虑 `kvrpcpb.Context` 参数（后续项目才会用到），P1 中直接传 `nil` 即可。** | 创建一个"快照读"，后面的 Get/Scan 都从这个快照里读 |
 
 > **关于 Reader 的实现方式**：你需要自己定义一个新的 struct（比如叫 `StandaloneStorageReader`），给它实现 `GetCF`、`IterCF`、`Close` 三个方法。`Reader()` 方法的职责就是创建并返回这个 struct 的实例。
@@ -218,7 +218,7 @@ gRPC 框架（自动处理）
 | 函数                  | 要做的事                                                                                                                                                                                                            |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **RawGet()**    | 1. 调`server.storage.Reader()` 拿到 reader2. 调 `reader.GetCF(req.Cf, req.Key)` 拿到 value3. 如果 key 不存在 value 为 nil，不要报错4. 把 value 填入 response，返回                                              |
-| **RawPut()**    | 1. 从请求中取出 Cf、Key、Value2. 构造一个 `storage.Modify{Data: storage.Put{...}}`3. 调 `server.storage.Write(ctx, []storage.Modify{modify})` 写入4. 返回空 response（或 error）                                |
+| **RawPut()**    | 1. 从请求中取出 Cf、Key、Value2. 构造一个`storage.Modify{Data: storage.Put{...}}`3. 调 `server.storage.Write(ctx, []storage.Modify{modify})` 写入4. 返回空 response（或 error）                                 |
 | **RawDelete()** | 同 RawPut，只是把`storage.Put` 换成 `storage.Delete`                                                                                                                                                            |
 | **RawScan()**   | 1. 调`server.storage.Reader()` 拿到 reader2. 调 `reader.IterCF(req.Cf)` 拿到迭代器3. 用 `iter.Seek(startKey)` 定位到起始位置4. 循环遍历，收集 kv 对，注意 `GetLimit()` 限制数量5. 把结果填入 response，返回 |
 |                       | **注意**：Scan 时别忘了在函数结束时调用 `reader.Close()`（用 `defer`）                                                                                                                                    |
