@@ -6,7 +6,7 @@
 
 badger 只认 `Key → Value`，engine_util 给所有 key 自动拼 `cf_` 前缀：
 
-```
+```text
 你调：engine_util.PutCF(db, "default", "foo", "hello")
 内部：badger 存的 key = "default_foo"
 ```
