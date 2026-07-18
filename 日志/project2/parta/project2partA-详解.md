@@ -4,28 +4,79 @@
 
 Part A 要求在 `raft/` 目录下实现 Raft 共识算法的核心，包括 Leader 选举、日志复制和 RawNode 接口。总共约 **15 个存根函数**，分布在 3 个文件中，分 3 个测试阶段渐进推进。
 
-**三个文件的关系**：
+### 架构总览
 
 ```
-log.go (RaftLog)    ← 最底层，管理日志条目的增删改查
-    ↑
-raft.go (Raft)      ← 核心层，持有 *RaftLog，实现选举和复制逻辑
-    ↑
-rawnode.go (RawNode) ← 封装层，包装 *Raft，提供 Ready 接口给上层
+                    ┌── Step(msg)  ← 上层传入消息
+                    │
+   ┌────────────────▼──────────────────────────────────┐
+   │  raft.go — Raft (核心状态机)                       │
+   │                                                    │
+   │  状态字段:  State (Follower/Candidate/Leader)      │
+   │             Term, Vote, Lead                       │
+   │             electionElapsed, heartbeatElapsed       │
+   │             Prs (peer 复制进度), votes (投票记录)   │
+   │             msgs (待发送消息队列)                    │
+   │                                                    │
+   │  持有:       *RaftLog  (log.go)                    │
+   │                                                    │
+   │  入口:       Step(msg) — 消息处理分发              │
+   │             tick()    — 逻辑时钟推进               │
+   │                                                    │
+   │  出口:       msgs     — 待发送消息，上层取走       │
+   │             RaftLog  — entries 变更，上层通过      │
+   │                        Ready 接口读取/持久化/应用   │
+   └────────────────────┬─────────────────────────────┘
+                        │
+        ┌───────────────▼──────────────────────────────┐
+        │  log.go — RaftLog (日志管理器)                │
+        │                                               │
+        │  区间模型:                                     │
+        │  snapshot/first...applied...committed...       │
+        │           ...stabled...last                    │
+        │                                               │
+        │  不变式:  applied ≤ committed ≤ stabled       │
+        │                                               │
+        │  持有:     Storage 接口 — 读写持久化日志      │
+        │           (测试用 MemoryStorage,              │
+        │            Part B 用 PeerStorage/badger)      │
+        └──────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────┐
+│  rawnode.go — RawNode (上层接口)      ← 阶段 3 实现  │
+│                                                      │
+│  RawNode 包装 Raft，提供 Ready 机制：                 │
+│    HasReady() → Ready() → 上层处理 → Advance()       │
+│                                                      │
+│  Ready 是增量而非快照——只包含自上次 Advance 以来      │
+│  累积的变更 (SoftState/HardState/Entries/             │
+│  Snapshot/CommittedEntries/Messages)                  │
+└──────────────────────────────────────────────────────┘
 ```
 
-**核心数据结构**：
+### 核心心智模型
 
-```
-snapshot/first.....applied....committed....stabled.....last
---------|------------------------------------------------|
-                         log entries
-```
+Part A 的 Raft 模块是一个**纯算法引擎**——不启动 goroutine，不做网络 I/O，不写磁盘。所有与外部世界的交互都推给上层。理解这个设计是写对代码的前提：
 
-- `stabled`：已持久化的最高 index
-- `committed`：已提交的最高 index（被多数节点确认）
-- `applied`：已应用到状态机的最高 index
-- 不变式：`applied <= committed <= stabled <= last`
+1. **消息进，消息出**。所有输入通过 `Step(msg)` 传入——包括网络消息（`MsgAppend`、`MsgRequestVote` 等）和本地消息（`MsgHup` 触发选举、`MsgBeat` 触发心跳、`MsgPropose` 提议日志）。处理后如有消息要发给其他 peer，推入 `r.msgs` 切片即可。测试框架负责把 `msgs` 里的消息投递给"对端"，再把对端的响应通过 `Step()` 投回来。**Raft 本身从不等待回复**。
+
+2. **时钟靠 tick 推进**。没有 `time.Timer`，只有一个计数器 `electionElapsed`。每次上层调用 `tick()`，计数器 +1。当 `electionElapsed >= electionTimeout` 时触发选举（Follower/Candidate 角色），或 `heartbeatElapsed >= heartbeatTimeout` 时发送心跳（Leader 角色）。关键在于：**上层不调 tick，选举永远不会超时**——测试代码可以精确控制时间的流逝速度，让测试变得确定性的。
+
+3. **Ready 是增量，不是快照**。`RawNode.Ready()` 返回的是自上次 `Advance()` 以来累积的变更，而不是当前状态。例如：leader 追加了一条 entry → `Ready()` 在 `Entries` 字段中返回它（待持久化）→ 上层持久化后调用 `Advance()` 更新 `stabled` 指针 → 下次 `Ready()` 不再包含它。如果 `Advance()` 忘了更新指针，`HasReady()` 会一直返回 true，导致死循环。
+
+4. **本地消息不受 term 检查**。`MsgHup`、`MsgBeat`、`MsgPropose` 是 Raft 模块内部使用的消息类型，通过 `Step()` 投递给自己。测试不会为它们设置 `Term` 字段（值为 0），因此在 `Step()` 中做"term 比我高就退位"的检查时，**必须排除这三种本地消息**，否则本地 MsgHup（term=0）到达一个 term>0 的节点时会被错误地忽略。
+
+### 文件分层与三阶段推进
+
+三个文件从底层到上层形成依赖链——`log.go`（日志） → `raft.go`（状态机） → `rawnode.go`（接口封装）。实现不是写完一个再写下一个，而是**每阶段同时推进三个文件**：
+
+| 阶段 | 跑通命令 | 改 `log.go` | 改 `raft.go` | 改 `rawnode.go` |
+| --- | --- | --- | --- | --- |
+| 1. 选举 | `make project2aa` | `newLog`, `LastIndex`, `Term` | `newRaft`, `becomeXXX`, `tick`, `Step`（`MsgHup`/`MsgRequestVote`/`MsgRequestVoteResponse`/`MsgHeartbeat`/`MsgBeat`） | 不动 |
+| 2. 日志复制 | `make project2ab` | `allEntries`, `unstableEntries`, `nextEnts` | `sendAppend`, `sendHeartbeat`, `handleAppendEntries`, `Step`（`MsgPropose`/`MsgAppend`/`MsgAppendResponse`） | 不动 |
+| 3. RawNode | `make project2ac` | 不动 | 不动 | `NewRawNode`, `HasReady`, `Ready`, `Advance` |
+
+**从这里开始**：打开 `log.go`，从 `newLog()` / `LastIndex()` / `Term()` 三个查询方法写起——这是最简单的，几分钟就能写完。然后切到 `raft.go`，从 `becomeFollower` / `becomeCandidate` / `becomeLeader` 三个状态转换开始。阶段 1 不需要 `allEntries()` 也不需要 `sendAppend()`——只写当前测试用得到的函数，跑通 `make project2aa` 再往下走。
 
 ---
 
@@ -54,6 +105,7 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 #### `LastIndex() uint64`
 
 返回最后一条日志条目的 index：
+
 - 如果有 entries，返回 `entries[len(entries)-1].Index`
 - 如果 entries 为空但有 `pendingSnapshot`，返回 snapshot 的 index
 - 如果都没有，返回 `l.stabled`（从 storage 恢复的值）
@@ -61,6 +113,7 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 #### `Term(i uint64) (uint64, error)`
 
 返回指定 index 的 term：
+
 1. 如果 index 在内存 entries 范围内，直接返回对应 entry 的 term
 2. 如果 index 小于第一个 entry 的 index（已被 compact），尝试从 `storage.Term(i)` 查询
 3. 如果 index 超出范围，返回错误
@@ -91,6 +144,7 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 这三个函数负责在角色切换时重置内部状态。
 
 **`becomeFollower(term uint64, lead uint64)`**：
+
 1. 重置 `r.State = StateFollower`
 2. 如果传入的 term 比当前 term 大，更新 `r.Term = term`
 3. 清空 `r.Vote = None`
@@ -101,6 +155,7 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 8. 将 `r.tick` 函数设为 `tickElection`
 
 **`becomeCandidate()`**：
+
 1. 重置 `r.State = StateCandidate`
 2. `r.Term++`（开始新一轮选举）
 3. `r.Vote = r.id`（投票给自己）
@@ -112,6 +167,7 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 9. 如果只剩一个节点（`len(r.Prs) == 1`），直接调用 `becomeLeader()`
 
 **`becomeLeader()`**：
+
 1. 重置 `r.State = StateLeader`
 2. `r.Lead = r.id`
 3. 重置 `r.electionElapsed = 0`
@@ -128,6 +184,7 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 推进逻辑时钟。需要根据当前角色选择不同的 tick 函数：
 
 **策略**：将 `tick` 设为一个函数变量，在 `becomeXXX` 中切换：
+
 ```go
 // 在 Raft 结构体中添加字段
 type Raft struct {
@@ -143,12 +200,14 @@ func (r *Raft) tick() {
 或者直接在 `tick()` 里根据 `r.State` 分发。
 
 **`tickElection()`**（Follower / Candidate 使用）：
+
 1. `r.electionElapsed++`
 2. 如果 `r.electionElapsed >= r.electionTimeout`：
    - 重置 `r.electionElapsed = 0`
    - 给自己发 `MsgHup`：`r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgHup})`
 
 **`tickHeartbeat()`**（Leader 使用）：
+
 1. `r.heartbeatElapsed++`
 2. 如果 `r.heartbeatElapsed >= r.heartbeatTimeout`：
    - 重置 `r.heartbeatElapsed = 0`
@@ -187,28 +246,34 @@ func (r *Raft) Step(m pb.Message) error {
 以下是在阶段 1 需要处理的消息类型：
 
 **收到 `MsgHup`**（在任何角色下）：
+
 - 如果在 `Prs` 中没有自己（不在集群中），忽略
 - 否则调用 `r.campaign()`：先 `becomeCandidate()`，然后向所有其他 peer 发送 `MsgRequestVote`
 - 如果已经是 Leader，忽略
 
 **Follower / Candidate 收到 `MsgRequestVote`**：
+
 - 如果 `m.Term < r.Term`：回复 `MsgRequestVoteResponse{Reject: true}`
 - 如果已经投过票（`r.Vote != None && r.Vote != m.From`）：回复 `MsgRequestVoteResponse{Reject: true}`
 - 比较 candidate 的日志是否至少和自己一样新：获取 candidate 的 `LastLogIndex`（从 `m.Index`、`m.LogTerm`），与自己的 `RaftLog.LastIndex()` 和 `RaftLog.Term(lastIndex)` 比较。如果 candidate 的日志不如自己新，回复 `Reject: true`
 - 否则：设置 `r.Vote = m.From`，回复 `MsgRequestVoteResponse{Reject: false}`
 
 **Candidate 收到 `MsgRequestVoteResponse`**：
+
 - 如果 `m.Reject == false`：记录 `r.votes[m.From] = true`，检查是否获得多数票（`len(votes) > len(r.Prs)/2`）。如果是，调用 `becomeLeader()`
 - 如果 `m.Reject == true`：记录 `r.votes[m.From] = false`，检查是否多数拒绝。如果是，退回到 Follower
 
 **收到 `MsgHeartbeat`**（Follower / Candidate）：
+
 - 如果 `m.Term >= r.Term`：调用 `becomeFollower(m.Term, m.From)`
 - 回复 `MsgHeartbeatResponse`
 
 **Follower / Candidate 收到 `MsgAppend`**（阶段 1 只需做基本的 term 检查）：
+
 - 如果 `m.Term >= r.Term`：调用 `becomeFollower(m.Term, m.From)`
 
 **Leader 收到 `MsgBeat`**：
+
 - 向所有其他 peer 发送 `MsgHeartbeat`
 
 > **本地消息处理技巧**：`MsgHup` → 触发选举；`MsgBeat` → 触发心跳广播；这些本地消息可以不经过 `Step()` 的 term 检查，直接在 `Step()` 中单独判断 `MsgType`。
@@ -220,6 +285,7 @@ make project2aa
 ```
 
 通过了说明：
+
 - 节点能从 Follower 超时变 Candidate
 - Candidate 正确请求投票和计票
 - 获得多数票后成为 Leader
@@ -270,6 +336,7 @@ Leader 向指定 peer 发送 `MsgAppend`：
 #### `sendHeartbeat(to uint64)`
 
 向指定 peer 发送 `MsgHeartbeat`：
+
 - 构造 `MsgHeartbeat{To: to, Term: r.Term, Commit: r.RaftLog.committed}`，加入 `r.msgs`
 
 #### `handleAppendEntries(m pb.Message)`
@@ -288,12 +355,14 @@ Leader 向指定 peer 发送 `MsgAppend`：
 #### 扩展 `Step()` 处理
 
 **Leader 收到 `MsgPropose`**：
+
 1. 将 `m.Entries` 中的 entry 追加到 `r.RaftLog.entries`（设置正确的 `Index` 和 `Term`）
 2. 更新自己的 `Prs[r.id].Match = lastIndex`，`Prs[r.id].Next = lastIndex + 1`
 3. 如果是单节点集群：直接 `r.RaftLog.committed = lastIndex`
 4. 调用 `bcastAppend()`：遍历所有 peer，给每个其他 peer 调用 `sendAppend()`
 
 **Leader 收到 `MsgAppendResponse`**：
+
 1. 如果 `m.Reject == false`：更新该 peer 的 `Progress.Match = m.Index`，`Progress.Next = m.Index + 1`
 2. 如果 `m.Reject == true`：将 `Progress.Next` 减 1，重新 `sendAppend()`（回溯找到一致点）
 3. **尝试推进 commit index**：
@@ -315,6 +384,7 @@ make project2ab
 ```
 
 通过了说明：
+
 - Leader 能正确追加日志
 - AppendEntries 的 prevLogIndex/prevLogTerm 校验正确
 - 日志冲突解决正确（Raft 论文 Figure 7 的全部 6 种情况）
@@ -357,6 +427,7 @@ type RawNode struct {
 判断是否有待处理的 Ready：
 
 返回 true 的条件（任意一项满足即可）：
+
 1. **SoftState 有变化**：`r.Lead != prevSoftSt.Lead` 或 `r.State != prevSoftSt.RaftState`
 2. **HardState 有变化**：`r.Term != prevHardSt.Term` 或 `r.Vote != prevHardSt.Vote` 或 `r.RaftLog.committed != prevHardSt.Commit`
 3. **有未持久化的 entries**：`len(r.RaftLog.unstableEntries()) > 0`
@@ -395,6 +466,7 @@ make project2ac
 ```
 
 通过后运行：
+
 ```bash
 make project2a   # 一次性跑全部 Part A
 ```
@@ -468,9 +540,9 @@ make project2a   # 一次性跑全部 Part A
 
 ## Part A 时间预估
 
-| 阶段 | 预计时间 | 说明 |
-|---|---|---|
-| 阶段 1（2AA） | 1.5-2 天 | Leader 选举，代码量最大，概念需要消化 |
-| 阶段 2（2AB） | 1.5-2 天 | 日志复制，冲突解决和提交规则容易出错 |
-| 阶段 3（2AC） | 0.5-1 天 | RawNode，代码量最少，依赖前两阶段正确 |
-| **合计** | **3.5-5 天** | 建议每阶段都跑通后再进入下一阶段 |
+| 阶段           | 预计时间           | 说明                                  |
+| -------------- | ------------------ | ------------------------------------- |
+| 阶段 1（2AA）  | 1.5-2 天           | Leader 选举，代码量最大，概念需要消化 |
+| 阶段 2（2AB）  | 1.5-2 天           | 日志复制，冲突解决和提交规则容易出错  |
+| 阶段 3（2AC）  | 0.5-1 天           | RawNode，代码量最少，依赖前两阶段正确 |
+| **合计** | **3.5-5 天** | 建议每阶段都跑通后再进入下一阶段      |
