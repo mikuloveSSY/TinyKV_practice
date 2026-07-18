@@ -4,6 +4,33 @@
 
 Project2 要求基于 Raft 共识算法实现一个高可用的 KV 服务器。与 Project1 的独立单机 KV 不同，Project2 是一个分布式系统——多个节点通过 Raft 协议保持数据一致性，即使部分节点故障或网络分区，只要多数节点存活，服务就能继续处理请求。
 
+### 整体架构
+
+Project2 的代码分为两层：
+
+**下层：Raft 算法层（`raft/`）**——对应 Part A。这是 Raft 共识协议的纯算法实现，不涉及网络传输和磁盘 I/O。核心是 `Raft` 结构体（状态机），通过 `Step()` 接收消息、通过 `tick()` 推进逻辑时钟、通过 `msgs` 产出待发送消息。`RawNode` 将其封装为 `Ready` 接口供上层消费。
+
+**上层：raftstore 服务层（`kv/raftstore/`）**——对应 Part B / Part C。这是真正让 Raft"跑起来"的框架层，负责网络消息收发、日志持久化到 badger、将已提交的日志应用到状态机（kvdb）。核心是 `raftWorker` 事件循环：
+
+```text
+raftCh (channel)
+  │
+  ├── MsgTypeTick      → RawNode.Tick()         // 推进 Raft 逻辑时钟
+  ├── MsgTypeRaftCmd   → proposeRaftCommand()   // 客户端请求 → 序列化为 Raft 日志
+  └── MsgTypeRaftMessage → RawNode.Step()       // 来自其他 peer 的 Raft 消息
+  │
+  ▼
+HandleRaftReady()
+  ├── SaveReadyState()   → badger (raftdb)      // 持久化 HardState + 日志条目
+  ├── Transport.Send()   → 网络                  // 发送 Raft 消息给其他 peer
+  ├── Apply committed entries → badger (kvdb)   // 应用到状态机
+  └── Advance()          → Raft                 // 确认处理完成
+```
+
+两个 badger 实例的分工：**raftdb** 存 Raft 日志和 `RaftLocalState`；**kvdb** 存真实 KV 数据、`RaftApplyState` 和 `RegionLocalState`。
+
+客户端请求的完整链路：`RPC → RaftStorage → raftCh → raftWorker → proposeRaftCommand → RawNode.Propose → Raft 复制/提交 → HandleRaftReady → 应用到 kvdb → 回调返回响应`。
+
 该项目分为三个部分：
 
 - **Part A**：实现基本的 Raft 算法（Leader 选举、日志复制、RawNode 接口）
