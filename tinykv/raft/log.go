@@ -18,9 +18,9 @@ import pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 
 // RaftLog manage the log entries, its struct look like:
 //
-//  snapshot/first.....applied....committed....stabled.....last
-//  --------|------------------------------------------------|
-//                            log entries
+//	snapshot/first.....applied....committed....stabled.....last
+//	--------|------------------------------------------------|
+//	                          log entries
 //
 // for simplify the RaftLog implement should manage all log entries
 // that not truncated
@@ -50,13 +50,24 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	return nil
+	firstindex, _ := storage.FirstIndex()
+	lastindext, _ := storage.LastIndex()
+	entries, _ := storage.Entries(firstindex, lastindext+1)
+	return &RaftLog{
+		storage:         storage,
+		committed:       firstindex - 1,
+		applied:         firstindex - 1,
+		stabled:         lastindext,
+		entries:         entries,
+		pendingSnapshot: nil,
+	}
 }
 
 // We need to compact the log entries in some point of time like
@@ -89,11 +100,24 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return 0
+	if len(l.entries) > 0 {
+		return l.entries[len(l.entries)-1].Index
+	} else if l.pendingSnapshot != nil {
+		return l.pendingSnapshot.Metadata.Index
+	} else {
+		return l.stabled
+	}
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	return 0, nil
+	if i > l.LastIndex() {
+		return 0, ErrUnavailable
+	} else if len(l.entries) > 0 && i >= l.entries[0].Index {
+		return l.entries[i-l.entries[0].Index].Term, nil
+	} else {
+		return l.storage.Term(i)
+	}
+
 }
