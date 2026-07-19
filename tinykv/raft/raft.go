@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -165,7 +166,26 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	return nil
+	hardstate, _, _ := c.Storage.InitialState()
+	raftlog := newLog(c.Storage)
+	raftlog.committed = hardstate.Commit
+	r := &Raft{
+		id:               c.ID,
+		Term:             hardstate.Term,
+		Vote:             hardstate.Term,
+		RaftLog:          raftlog,
+		Lead:             None,
+		heartbeatTimeout: c.ElectionTick + rand.Intn(c.ElectionTick),
+	}
+	//Prs——用于当Leader时追踪每个 Follower 日志追到哪了
+	r.Prs = make(map[uint64]*Progress)
+	for _, peer := range c.peers {
+		r.Prs[peer] = &Progress{Match: 0, Next: 1}
+	}
+
+	r.votes = make(map[uint64]bool)
+	r.becomeFollower(r.Term, None)
+	return r
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the

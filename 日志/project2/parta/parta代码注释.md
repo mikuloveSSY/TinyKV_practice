@@ -42,4 +42,40 @@ snapshot/first.....applied....committed....stabled.....last
 
 ## Raft.go
 
-## （1）
+## （1）`Raft` 结构体字段 & `newRaft()` 初始化
+
+Raft 结构体 13 个字段按初始化方式分成两拨：
+
+**`newRaft()` 直接设的**（有明确来源——Config 或硬盘）：
+
+| 字段                 | 来源                               | 含义                                                                   |
+| -------------------- | ---------------------------------- | ---------------------------------------------------------------------- |
+| `id`               | `Config.ID`                      | 节点编号                                                               |
+| `Term`             | `HardState` 从硬盘恢复           | 当前任期，区分新旧 Leader                                              |
+| `Vote`             | `HardState`                      | 这个 term 投给了谁                                                     |
+| `RaftLog`          | `newLog(storage)` 从硬盘恢复日志 | entries + 三个指针                                                     |
+| `Prs`              | `Config.peers` 遍历              | 记录每一个Follower：已经收到的最新日志的编号和下一个需要接收的日志编号 |
+| `Lead`             | 直接填`None`（=0）               | 当前结点追随的Leader                                                   |
+| `electionTimeout`  | `Config.ElectionTick + 随机`     | 超时时限。距离上次接收到心跳的时间超过了它就发起选举                   |
+| `heartbeatTimeout` | `Config.HeartbeatTick`           | 作为Leader时隔多久发一次心跳                                           |
+| `votes`            | `make(map[uint64]bool)`          | 作为Candidate时的计票 map （`becomeFollower` 会清空）                |
+
+**`becomeFollower()` 在 `newRaft()` 末尾统一调用来设置字段**（附加好处：后续角色切换时复用同一套逻辑）：
+
+| 字段                 | 含义                                                                                                       |
+| -------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `State`            | 角色：Follower / Candidate / Leader                                                                        |
+| `electionElapsed`  | 距上次收到 Leader 消息过了几个 tick，超时就选举                                                            |
+| `heartbeatElapsed` | 距上次发心跳过了几个 tick（Leader 用）                                                                     |
+| `tick`             | 函数指针，指向`tickElection` （作为follower或者candidate的计时）或 `tickHeartbeat`（作为leader的计时） |
+| `votes`            | 清空                                                                                                       |
+
+`msgs` 两边都不管——nil 切片可直接 `append`。
+
+**HardState** 是 Raft结点 必须持久化的三条信息。`newRaft()` 首先调 `c.Storage.InitialState()` 从硬盘读出 `{Term, Vote, Commit}`：
+
+- 丢了 Term → 用旧 term 发消息，被其他节点无视
+- 丢了 Vote → 同一 term 投两次票，可能选出两个 Leader
+- 丢了 Commit → 拒绝执行已共识的日志，节点卡住，导致请求超时
+
+`newLog()`初始化时把 committed 填了保守值 `firstIndex-1`（snapshot 兜底）。但在中途启动时，实际的共识可能已经远超 snapshot 覆盖的范围了，所以`newRaft()` 必须立刻用 `HardState.Commit` 覆盖为真正的共识位置。全新启动时三项都是 0，代码不需要区分。

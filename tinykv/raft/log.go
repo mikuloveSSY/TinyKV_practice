@@ -113,7 +113,7 @@ func (l *RaftLog) LastIndex() uint64 {
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
 	if i > l.LastIndex() {
-		return 0, ErrUnavailable
+		return None, ErrUnavailable
 	} else if len(l.entries) > 0 && i >= l.entries[0].Index {
 		return l.entries[i-l.entries[0].Index].Term, nil
 	} else {
