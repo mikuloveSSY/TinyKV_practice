@@ -144,6 +144,9 @@ type Raft struct {
 	// valid message from current leader when it is a follower.
 	electionElapsed int
 
+	//增加Tick字段用于切换时钟
+	tickFn func()
+
 	// leadTransferee is id of the leader transfer target when its value is not zero.
 	// Follow the procedure defined in section 3.10 of Raft phd thesis.
 	// (https://web.stanford.edu/~ouster/cgi-bin/papers/OngaroPhD.pdf)
@@ -172,18 +175,15 @@ func newRaft(c *Config) *Raft {
 	r := &Raft{
 		id:               c.ID,
 		Term:             hardstate.Term,
-		Vote:             hardstate.Term,
 		RaftLog:          raftlog,
-		Lead:             None,
-		heartbeatTimeout: c.ElectionTick + rand.Intn(c.ElectionTick),
+		electionTimeout:  c.ElectionTick + rand.Intn(c.ElectionTick),
+		heartbeatTimeout: c.HeartbeatTick,
 	}
-	//Prs——用于当Leader时追踪每个 Follower 日志追到哪了
+	//Prs——用于当Leader时追踪每个 Follower的日志到哪了
 	r.Prs = make(map[uint64]*Progress)
 	for _, peer := range c.peers {
 		r.Prs[peer] = &Progress{Match: 0, Next: 1}
 	}
-
-	r.votes = make(map[uint64]bool)
 	r.becomeFollower(r.Term, None)
 	return r
 }
@@ -208,6 +208,16 @@ func (r *Raft) tick() {
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
+	r.State = StateFollower
+	if r.Term < term {
+		r.Term = term
+	}
+	r.Lead = lead
+	r.Vote = None
+	r.votes = make(map[uint64]bool)
+	r.electionElapsed = 0
+	r.heartbeatElapsed = 0
+	r.tickFn = r.tickElection
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -256,4 +266,13 @@ func (r *Raft) addNode(id uint64) {
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+}
+
+// 增加​tickElection()​与tickHeartbeat()​，用于tick()方法调用
+func (r *Raft) tickElection() {
+
+}
+
+func (r *Raft) tickHeartbeat() {
+
 }

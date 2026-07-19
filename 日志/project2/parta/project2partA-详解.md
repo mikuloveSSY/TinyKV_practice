@@ -59,22 +59,19 @@ Part A 要求在 `raft/` 目录下实现 Raft 共识算法的核心，包括 Lea
 Part A 的 Raft 模块是一个**纯算法引擎**——不启动 goroutine，不做网络 I/O，不写磁盘。所有与外部世界的交互都推给上层。理解这个设计是写对代码的前提：
 
 1. **消息进，消息出**。所有输入通过 `Step(msg)` 传入——包括网络消息（`MsgAppend`、`MsgRequestVote` 等）和本地消息（`MsgHup` 触发选举、`MsgBeat` 触发心跳、`MsgPropose` 提议日志）。处理后如有消息要发给其他 peer，推入 `r.msgs` 切片即可。测试框架负责把 `msgs` 里的消息投递给"对端"，再把对端的响应通过 `Step()` 投回来。**Raft 本身从不等待回复**。
-
 2. **时钟靠 tick 推进**。没有 `time.Timer`，只有一个计数器 `electionElapsed`。每次上层调用 `tick()`，计数器 +1。当 `electionElapsed >= electionTimeout` 时触发选举（Follower/Candidate 角色），或 `heartbeatElapsed >= heartbeatTimeout` 时发送心跳（Leader 角色）。关键在于：**上层不调 tick，选举永远不会超时**——测试代码可以精确控制时间的流逝速度，让测试变得确定性的。
-
 3. **Ready 是增量，不是快照**。`RawNode.Ready()` 返回的是自上次 `Advance()` 以来累积的变更，而不是当前状态。例如：leader 追加了一条 entry → `Ready()` 在 `Entries` 字段中返回它（待持久化）→ 上层持久化后调用 `Advance()` 更新 `stabled` 指针 → 下次 `Ready()` 不再包含它。如果 `Advance()` 忘了更新指针，`HasReady()` 会一直返回 true，导致死循环。
-
 4. **本地消息不受 term 检查**。`MsgHup`、`MsgBeat`、`MsgPropose` 是 Raft 模块内部使用的消息类型，通过 `Step()` 投递给自己。测试不会为它们设置 `Term` 字段（值为 0），因此在 `Step()` 中做"term 比我高就退位"的检查时，**必须排除这三种本地消息**，否则本地 MsgHup（term=0）到达一个 term>0 的节点时会被错误地忽略。
 
 ### 文件分层与三阶段推进
 
 三个文件从底层到上层形成依赖链——`log.go`（日志） → `raft.go`（状态机） → `rawnode.go`（接口封装）。实现不是写完一个再写下一个，而是**每阶段同时推进三个文件**：
 
-| 阶段 | 跑通命令 | 改 `log.go` | 改 `raft.go` | 改 `rawnode.go` |
-| --- | --- | --- | --- | --- |
-| 1. 选举 | `make project2aa` | `newLog`, `LastIndex`, `Term` | `newRaft`, `becomeXXX`, `tick`, `Step`（`MsgHup`/`MsgRequestVote`/`MsgRequestVoteResponse`/`MsgHeartbeat`/`MsgBeat`） | 不动 |
-| 2. 日志复制 | `make project2ab` | `allEntries`, `unstableEntries`, `nextEnts` | `sendAppend`, `sendHeartbeat`, `handleAppendEntries`, `Step`（`MsgPropose`/`MsgAppend`/`MsgAppendResponse`） | 不动 |
-| 3. RawNode | `make project2ac` | 不动 | 不动 | `NewRawNode`, `HasReady`, `Ready`, `Advance` |
+| 阶段        | 跑通命令            | 改`log.go`                                      | 改`raft.go`                                                                                                                           | 改`rawnode.go`                                     |
+| ----------- | ------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| 1. 选举     | `make project2aa` | `newLog`, `LastIndex`, `Term`               | `newRaft`, `becomeXXX`, `tick`, `Step`（`MsgHup`/`MsgRequestVote`/`MsgRequestVoteResponse`/`MsgHeartbeat`/`MsgBeat`） | 不动                                                 |
+| 2. 日志复制 | `make project2ab` | `allEntries`, `unstableEntries`, `nextEnts` | `sendAppend`, `sendHeartbeat`, `handleAppendEntries`, `Step`（`MsgPropose`/`MsgAppend`/`MsgAppendResponse`）              | 不动                                                 |
+| 3. RawNode  | `make project2ac` | 不动                                              | 不动                                                                                                                                    | `NewRawNode`, `HasReady`, `Ready`, `Advance` |
 
 **从这里开始**：打开 `log.go`，从 `newLog()` / `LastIndex()` / `Term()` 三个查询方法写起——这是最简单的，几分钟就能写完。然后切到 `raft.go`，从 `becomeFollower` / `becomeCandidate` / `becomeLeader` 三个状态转换开始。阶段 1 不需要 `allEntries()` 也不需要 `sendAppend()`——只写当前测试用得到的函数，跑通 `make project2aa` 再往下走。
 
@@ -128,14 +125,12 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 
 1. 调用 `c.Storage.InitialState()` 获取持久化的 `HardState`（Term、Vote、Commit）
 2. 创建 `RaftLog`：`newLog(c.Storage)`
-3. 用 `HardState` 设置 `r.Term`、`r.Vote`
-4. 设置 `r.RaftLog.committed = hardState.Commit`
-5. 初始化 `Prs`：遍历 `c.peers`，为每个 peer 创建 `Progress{Match: 0, Next: 1}`
-6. 将自己也加入 `Prs`（`Match: 0, Next: 1`）
-7. 初始化 `votes` map
-8. 初始角色为 Follower：调用 `becomeFollower(term, None)`
-9. 设置 `heartbeatTimeout` 和 `electionTimeout`
-10. 随机化 `electionElapsed`（见下文）
+3. 创建`Raft结点`，准备初始化
+4. 用 `HardState` 设置 `r.Term`
+5. 设置 `r.RaftLog.committed = hardState.Commit`
+6. 初始化 `Prs`：遍历 `c.peers`，为每个 peer 创建 `Progress{Match: 0, Next: 1}`
+7. 设置 `heartbeatTimeout` 和 `electionTimeout`
+8. 初始角色为 Follower：调用 `becomeFollower(r.term, None)`
 
 > **关键**：`Config` 中的 `peers` 包含了集群中所有节点的 ID（包括自己），需要遍历它来初始化 `Prs`。
 
@@ -147,12 +142,12 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 
 1. 重置 `r.State = StateFollower`
 2. 如果传入的 term 比当前 term 大，更新 `r.Term = term`
-3. 清空 `r.Vote = None`
-4. 设置 `r.Lead = lead`
-5. 重置 `r.electionElapsed = 0`（收到有效消息后重置选举计时）
-6. 重置 `r.heartbeatElapsed = 0`
-7. 清空 `r.votes`
-8. 将 `r.tick` 函数设为 `tickElection`
+3. 设置 `r.Lead = lead`
+4. 清空 `r.Vote = None`
+5. 清空 `r.votes`
+6. 重置 `r.electionElapsed = 0`（收到有效消息后重置选举计时）
+7. 重置 `r.heartbeatElapsed = 0`
+8. 将 `r.tickFn` 函数设为 `tickElection`
 
 **`becomeCandidate()`**：
 
@@ -163,7 +158,7 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 5. 重置 `r.electionElapsed = 0`
 6. 重置 `r.heartbeatElapsed = 0`
 7. 初始化 `r.votes = map[uint64]bool{r.id: true}`（自己先投一票）
-8. 将 `r.tick` 函数设为 `tickElection`
+8. 将 `r.tickFn` 函数设为 `tickElection`
 9. 如果只剩一个节点（`len(r.Prs) == 1`），直接调用 `becomeLeader()`
 
 **`becomeLeader()`**：
@@ -173,7 +168,7 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 3. 重置 `r.electionElapsed = 0`
 4. 重置 `r.heartbeatElapsed = 0`
 5. 清空 `r.votes`
-6. 将 `r.tick` 函数设为 `tickHeartbeat`
+6. 将 `r.tickFn` 函数设为 `tickHeartbeat`
 7. 重置所有 peer 的 `Progress`：`Match = 0`，`Next = r.RaftLog.LastIndex() + 1`
 8. **追加 noop entry**：构造一条 `Entry{Term: r.Term, Index: r.RaftLog.LastIndex() + 1}`，追加到 `r.RaftLog.entries`。更新 `Prs[r.id].Match` 和 `Prs[r.id].Next`
 
@@ -189,11 +184,11 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 // 在 Raft 结构体中添加字段
 type Raft struct {
     // ... 其他字段 ...
-    tick func()  // 函数指针，指向 tickElection 或 tickHeartbeat
+    tickFn func()  // 函数指针，指向 tickElection 或 tickHeartbeat
 }
 
 func (r *Raft) tick() {
-    r.tick()  // 调用实际的 tick 函数
+    r.tickFn()  // 调用实际的 tick 函数
 }
 ```
 
