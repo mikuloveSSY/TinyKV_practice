@@ -223,12 +223,52 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	r.State = StateCandidate
+	r.Term++
+	r.Lead = None
+	//投票给自己
+	r.Vote = r.id
+	r.votes = make(map[uint64]bool)
+	r.votes[r.id] = true
+	r.electionElapsed = 0
+	r.heartbeatElapsed = 0
+	r.tickFn = r.tickElection
+	// 全部只剩1个结点时，自然都不用选举了，直接成为领导者
+	if len(r.Prs) == 1 {
+		r.becomeLeader()
+	}
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	r.State = StateLeader
+	r.Lead = r.id
+	// Term不用管，因为成为Leader前必然经过candidate，已经加过了，是新一轮
+	// 选举结束了，与投票相关的都清空
+	r.Vote = None
+	r.votes = make(map[uint64]bool)
+	r.electionElapsed = 0
+	r.heartbeatElapsed = 0
+	r.tickFn = r.tickHeartbeat
+	// 成为新Leader后，要重置一下Prs
+	for id := range r.Prs {
+		r.Prs[id] = &Progress{
+			Match: 0, // 默认设置为0表示还未知
+			// 下次从自己最后一条之后开始发
+			Next: r.RaftLog.LastIndex() + 1,
+		}
+	}
+	// 增加一条空日志，用于刷新其他结点状态，并推动旧日志的提交
+	noop := pb.Entry{
+		Term:  r.Term,
+		Index: r.RaftLog.LastIndex() + 1,
+	}
+	r.RaftLog.entries = append(r.RaftLog.entries, noop)
+	// 因为增加了新日志，所以要更新一下prs里的自己的progress
+	r.Prs[r.id].Match = noop.Index
+	r.Prs[r.id].Next = noop.Index + 1
 }
 
 // Step the entrance of handle message, see `MessageType`

@@ -153,11 +153,11 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 
 1. 重置 `r.State = StateCandidate`
 2. `r.Term++`（开始新一轮选举）
-3. `r.Vote = r.id`（投票给自己）
 4. `r.Lead = None`
+3. `r.Vote = r.id`（投票给自己）
+7. 初始化 `r.votes = map[uint64]bool{r.id: true}`（自己先投一票）
 5. 重置 `r.electionElapsed = 0`
 6. 重置 `r.heartbeatElapsed = 0`
-7. 初始化 `r.votes = map[uint64]bool{r.id: true}`（自己先投一票）
 8. 将 `r.tickFn` 函数设为 `tickElection`
 9. 如果只剩一个节点（`len(r.Prs) == 1`），直接调用 `becomeLeader()`
 
@@ -165,9 +165,9 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 
 1. 重置 `r.State = StateLeader`
 2. `r.Lead = r.id`
+5. 清空 `r.votes`
 3. 重置 `r.electionElapsed = 0`
 4. 重置 `r.heartbeatElapsed = 0`
-5. 清空 `r.votes`
 6. 将 `r.tickFn` 函数设为 `tickHeartbeat`
 7. 重置所有 peer 的 `Progress`：`Match = 0`，`Next = r.RaftLog.LastIndex() + 1`
 8. **追加 noop entry**：构造一条 `Entry{Term: r.Term, Index: r.RaftLog.LastIndex() + 1}`，追加到 `r.RaftLog.entries`。更新 `Prs[r.id].Match` 和 `Prs[r.id].Next`
