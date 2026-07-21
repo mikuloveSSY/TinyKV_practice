@@ -178,6 +178,7 @@ func newRaft(c *Config) *Raft {
 	r := &Raft{
 		id:                  c.ID,
 		Term:                hardstate.Term,
+		Vote:                hardstate.Vote,
 		RaftLog:             raftlog,
 		electionTimeoutBase: c.ElectionTick,
 		heartbeatTimeout:    c.HeartbeatTick,
@@ -253,9 +254,9 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.State = StateFollower
 	if r.Term < term {
 		r.Term = term
+		r.Vote = None
 	}
 	r.Lead = lead
-	r.Vote = None
 	r.votes = make(map[uint64]bool)
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
@@ -319,9 +320,13 @@ func (r *Raft) becomeLeader() {
 	r.Prs[r.id].Match = noop.Index
 	r.Prs[r.id].Next = noop.Index + 1
 	// 分发空日志更新Follower结点状态
-	for id := range r.Prs {
-		if id != r.id {
-			r.sendAppend(id)
+	if len(r.Prs) == 1 {
+		r.RaftLog.committed = noop.Index
+	} else {
+		for id := range r.Prs {
+			if id != r.id {
+				r.sendAppend(id)
+			}
 		}
 	}
 }
@@ -443,21 +448,18 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 		}
 
 	case pb.MessageType_MsgRequestVote:
-		// 比较日志新旧，再决定是否退位
-		lastIndex := r.RaftLog.LastIndex()
-		lastTerm, _ := r.RaftLog.Term(lastIndex)
-		// 对方日志只有比我新时 → 投票给它，退位；否则继续竞争
-		if m.LogTerm > lastTerm || (m.LogTerm == lastTerm && m.Index > lastIndex) {
-			r.becomeFollower(r.Term, None)
-			r.Vote = m.From
+		// 因为候选人默认投票给自己的，所以直接拒绝
+		// 注意回避自己的投票请求
+		if m.From != r.id {
+			r.msgs = append(r.msgs, pb.Message{
+				MsgType: pb.MessageType_MsgRequestVoteResponse,
+				To:      m.From,
+				From:    r.id,
+				Term:    r.Term,
+				Reject:  true,
+			})
+			return nil
 		}
-		r.msgs = append(r.msgs, pb.Message{
-			MsgType: pb.MessageType_MsgRequestVoteResponse,
-			To:      m.From,
-			From:    r.id,
-			Term:    r.Term,
-			Reject:  r.Vote != m.From,
-		})
 
 	case pb.MessageType_MsgRequestVoteResponse:
 		r.votes[m.From] = !m.Reject
@@ -531,10 +533,14 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		// 更新自己的 Progress
 		r.Prs[r.id].Match = r.RaftLog.LastIndex()
 		r.Prs[r.id].Next = r.Prs[r.id].Match + 1
-		// 广播给所有 Follower
-		for id := range r.Prs {
-			if id != r.id {
-				r.sendAppend(id)
+		if len(r.Prs) == 1 {
+			r.RaftLog.committed = r.RaftLog.LastIndex()
+		} else {
+			// 广播给所有 Follower
+			for id := range r.Prs {
+				if id != r.id {
+					r.sendAppend(id)
+				}
 			}
 		}
 
@@ -555,7 +561,7 @@ func (r *Raft) stepLeader(m pb.Message) error {
 				matches = append(matches, pr.Match)
 			}
 			sort.Slice(matches, func(i, j int) bool { return matches[i] < matches[j] })
-			newCommit := matches[len(matches)/2]
+			newCommit := matches[(len(matches)-1)/2]
 			// 大于记录的commit时准备提交
 			if newCommit > r.RaftLog.committed {
 				term, _ := r.RaftLog.Term(newCommit)
@@ -617,6 +623,10 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			localTerm, _ := r.RaftLog.Term(e.Index)
 			if localTerm != e.Term {
 				// 冲突！从这里截断
+				// 注意，既然日志要覆盖了，那么stabled也可能要进行更新
+				if e.Index <= r.RaftLog.stabled {
+					r.RaftLog.stabled = e.Index - 1
+				}
 				firstIndex := r.RaftLog.entries[0].Index
 				r.RaftLog.entries = r.RaftLog.entries[:e.Index-firstIndex]
 				r.RaftLog.entries = append(r.RaftLog.entries, *e)
@@ -629,7 +639,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	}
 
 	// 3、更新 commit（Leader若commit更大，那就要更新）
-	lastNewIndex := r.RaftLog.LastIndex()
+	lastNewIndex := m.Index + uint64(len(m.Entries))
 	if m.Commit > r.RaftLog.committed {
 		r.RaftLog.committed = min(m.Commit, lastNewIndex)
 	}

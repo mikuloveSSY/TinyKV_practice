@@ -82,19 +82,51 @@ func (l *RaftLog) maybeCompact() {
 // note, this is one of the test stub functions you need to implement.
 func (l *RaftLog) allEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	if len(l.entries) == 0 {
+		return nil
+	}
+	// 第一个 entry 可能是 index=0 的 dummy，排除它
+	if l.entries[0].Index == 0 {
+		return l.entries[1:]
+	}
+	return l.entries
 }
 
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	if len(l.entries) == 0 {
+		return []pb.Entry{}
+	}
+	firstIdx := l.entries[0].Index
+	lastIdx := l.entries[len(l.entries)-1].Index
+	if l.stabled >= lastIdx {
+		return []pb.Entry{} // 全部已持久化
+	}
+	if l.stabled < firstIdx {
+		return l.entries // 全部未持久化
+	}
+	return l.entries[l.stabled-firstIdx+1:]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return nil
+	if len(l.entries) == 0 {
+		return nil
+	}
+	firstIdx := l.entries[0].Index
+	// applied < index <= committed
+	start := l.applied + 1
+	end := l.committed
+	// 防御性判断，正常情况下compaction只会到applied为止
+	if start <= firstIdx {
+		start = firstIdx
+	}
+	if start > end {
+		return nil
+	}
+	return l.entries[start-firstIdx : end-firstIdx+1]
 }
 
 // LastIndex return the last index of the log entries

@@ -18,6 +18,14 @@ snapshot/first.....applied....committed....stabled.....last
 
 不变式：`applied <= committed <= stabled`
 
+#### ab：向上层提供的三个关键区间查询函数：
+
+| 函数                  | 区间                     | 用途                                         |
+| --------------------- | ------------------------ | -------------------------------------------- |
+| `nextEnts()`        | `(applied, committed]` | 返回已共识未执行的日志，上层拿去应用到状态机 |
+| `unstableEntries()` | `(stabled, last]`      | 返回未持久化的日志，上层拿去写硬盘           |
+| `allEntries()`      | `[first, last]`        | 全部内存日志，测试用                         |
+
 **与传统单机数据库的区别**：单机的 committed = 写盘成功 ≈ Raft 的 `stabled`。Raft 的 `committed` 多一个条件——必须多数节点写盘，单自己写盘不够，新 Leader 可能覆盖。
 
 **为什么 committed 之后还要 applied？** Raft 是异步的——committed 只是"可以执行"，不是"已执行"。上层通过 Ready 拿 committed entries，执行完调 Advance()，applied 才追上 committed。
@@ -82,7 +90,7 @@ Raft 结构体 13 个字段按初始化方式分成两拨：
 
 `newLog()`初始化时把 committed 填了保守值 `firstIndex-1`（snapshot 兜底）。但在中途启动时，实际的共识可能已经远超 snapshot 覆盖的范围了，所以`newRaft()` 必须立刻用 `HardState.Commit` 覆盖为真正的共识位置。全新启动时三项都是 0，代码不需要区分。
 
-### （2）ab：`tick()` 为什么拆成 `tickElection()` 和 `tickHeartbeat()`
+### （2）aa：`tick()` 为什么拆成 `tickElection()` 和 `tickHeartbeat()`
 
 `tick()` 每次被上层调用时，需要根据当前角色执行不同逻辑：Follower/Candidate 超时发起选举，Leader 超时发送心跳。
 
@@ -95,7 +103,7 @@ Raft 结构体 13 个字段按初始化方式分成两拨：
 
 效果一样，但 etcd/TinyKV 选择了函数指针，每次角色设置时会设置tick指向的函数——避免了每次 tick 都走 switch的消耗。两个方法绑定在 `*Raft` 上（`func (r *Raft) tickElection()` / `func (r *Raft) tickHeartbeat()`），这样不用每次传参数了。
 
-### （3）"只有当前 term 的 entry 能通过数副本提交"——为什么需要这条核心规则
+### （3）ab："只有当前 term 的 entry 能通过数副本提交"——为什么需要这条核心规则
 
 Raft 论文第 5.4.2 节的核心规则：**Leader 不能通过数副本的方式提交之前 term 的 entry，只有当前 term 的 entry 可以。**
 
@@ -176,7 +184,7 @@ pb.Message {
 
 当**接收到`Term`更大**的消息时Candidate/Leader都选择退位，因为此时自己太落后了。但：
 
-* Candidate 收到`相同term`的`心跳、MsgAppend` → 说明Leader 已存在，退位成为 Follower 再处理；若收到的是`相同term`的`MsgRequestVote`，则根据日志比较新旧，再决定是否退位（**注意：**若日志一样新，则继续竞争，防止一直退位导致无Leader）。
+* Candidate 收到`相同term`的`心跳、MsgAppend` → 说明Leader 已存在，退位成为 Follower 再处理；若收到的是`相同term`的`MsgRequestVote`，则根据日志比较新旧，再决定是否退位（**注意：** 若日志一样新，则继续竞争，防止一直退位导致无Leader）。
 * Leader 收到`相同term`的`心跳、MsgAppend` → 另一个 Leader 在发日志和心跳，直接退位成为Follower再处理。
 
 ### （9）ab：`handleAppendEntries` —— Follower 端日志复制处理

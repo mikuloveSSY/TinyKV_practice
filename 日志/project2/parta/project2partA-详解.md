@@ -485,26 +485,26 @@ make project2a   # 一次性跑全部 Part A
 - [X] `raft.go`：`becomeCandidate()` term++，投票给自己
 - [X] `raft.go`：`becomeLeader()` 初始化 Prs，追加 noop entry
 - [X] `raft.go`：`tick()` 驱动 `tickElection` / `tickHeartbeat`
-- [ ] `raft.go`：`Step()` term 检查 + 角色路由
-- [ ] `raft.go`：处理 `MsgHup` → 发起选举
-- [ ] `raft.go`：处理 `MsgRequestVote` → 投票逻辑
-- [ ] `raft.go`：处理 `MsgRequestVoteResponse` → 计票
-- [ ] `raft.go`：处理 `MsgHeartbeat` → 更新 leader
-- [ ] `raft.go`：处理 `MsgBeat` → 广播心跳
+- [X] `raft.go`：`Step()` term 检查 + 角色路由
+- [X] `raft.go`：处理 `MsgHup` → 发起选举
+- [X] `raft.go`：处理 `MsgRequestVote` → 投票逻辑
+- [X] `raft.go`：处理 `MsgRequestVoteResponse` → 计票
+- [X] `raft.go`：处理 `MsgHeartbeat` → 更新 leader
+- [X] `raft.go`：处理 `MsgBeat` → 广播心跳
 
 **跑通**：`make project2aa`
 
 ### 阶段 2（2AB）：日志复制
 
-- [ ] `log.go`：`allEntries()` 返回所有未 compact 的 entries
-- [ ] `log.go`：`unstableEntries()` 返回未持久化的 entries
-- [ ] `log.go`：`nextEnts()` 返回已提交未应用的 entries
-- [ ] `raft.go`：`sendAppend()` 构造 MsgAppend
-- [ ] `raft.go`：`sendHeartbeat()` 构造 MsgHeartbeat
-- [ ] `raft.go`：`handleAppendEntries()` 一致性检查 + 冲突解决 + 更新 commit
-- [ ] `raft.go`：`Step()` 处理 `MsgPropose`（leader 追加日志）
-- [ ] `raft.go`：`Step()` 处理 `MsgAppendResponse`（leader 更新 Progress + 推进 commit）
-- [ ] `raft.go`：日志冲突时 Next 回溯
+- [X] `log.go`：`allEntries()` 返回所有未 compact 的 entries
+- [X] `log.go`：`unstableEntries()` 返回未持久化的 entries
+- [X] `log.go`：`nextEnts()` 返回已提交未应用的 entries
+- [X] `raft.go`：`sendAppend()` 构造 MsgAppend
+- [X] `raft.go`：`sendHeartbeat()` 构造 MsgHeartbeat
+- [X] `raft.go`：`handleAppendEntries()` 一致性检查 + 冲突解决 + 更新 commit
+- [X] `raft.go`：`Step()` 处理 `MsgPropose`（leader 追加日志）
+- [X] `raft.go`：`Step()` 处理 `MsgAppendResponse`（leader 更新 Progress + 推进 commit）
+- [X] `raft.go`：日志冲突时 Next 回溯
 
 **跑通**：`make project2ab`
 
