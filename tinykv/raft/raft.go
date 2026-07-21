@@ -194,7 +194,38 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	return false
+	pr := r.Prs[to]
+	prevLogIndex := pr.Next - 1
+	// 用于Follower确认已经收到的最后一条的term是否一致
+	prevLogTerm, err := r.RaftLog.Term(prevLogIndex)
+	if err != nil {
+		// prevLogIndex 已被 compact，需要发 snapshot（2C 再处理）
+		return false
+	}
+
+	// 创建要发送的日志切片，从Next到lastIndex
+	lastIndex := r.RaftLog.LastIndex()
+	entries := make([]*pb.Entry, 0)
+	for i := pr.Next; i <= lastIndex; i++ {
+		idx := i - r.RaftLog.entries[0].Index
+		entries = append(entries, &pb.Entry{
+			Index: r.RaftLog.entries[idx].Index,
+			Term:  r.RaftLog.entries[idx].Term,
+			Data:  r.RaftLog.entries[idx].Data,
+		})
+	}
+
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		Index:   prevLogIndex,
+		LogTerm: prevLogTerm,
+		Entries: entries,
+		Commit:  r.RaftLog.committed,
+	})
+	return true
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -277,15 +308,20 @@ func (r *Raft) becomeLeader() {
 	}
 	// NOTE: 2AA 阶段不追加 noop 日志，避免破坏 Leader 轮换
 	// （日志复制在 2AB 实现后再加上）
-	// // 增加一条空日志，用于刷新其他结点状态，并推动旧日志的提交
-	// noop := pb.Entry{
-	// 	Term:  r.Term,
-	// 	Index: r.RaftLog.LastIndex() + 1,
-	// }
-	// r.RaftLog.entries = append(r.RaftLog.entries, noop)
-	// // 因为增加了新日志，所以要更新一下prs里的自己的progress
-	// r.Prs[r.id].Match = noop.Index
-	// r.Prs[r.id].Next = noop.Index + 1
+	// 增加一条空日志，用于刷新其他结点状态，并推动旧日志的提交
+	noop := pb.Entry{
+		Term:  r.Term,
+		Index: r.RaftLog.LastIndex() + 1,
+	}
+	r.RaftLog.entries = append(r.RaftLog.entries, noop)
+	// 因为增加了新日志，所以要更新一下prs里的自己的progress
+	r.Prs[r.id].Match = noop.Index
+	r.Prs[r.id].Next = noop.Index + 1
+	for id := range r.Prs {
+		if id != r.id {
+			r.sendAppend(id)
+		}
+	}
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -492,6 +528,65 @@ func (r *Raft) stepLeader(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	// 1、一致性检查：prevLogIndex 处 term 是否匹配
+	if m.Index > r.RaftLog.LastIndex() {
+		// 说明 Follower 日志更短，告诉 Leader 自己最后一条的位置
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgAppendResponse,
+			To:      m.From,
+			From:    r.id,
+			Term:    r.Term,
+			Reject:  true,
+			Index:   r.RaftLog.LastIndex() + 1, // 告诉 Leader 下一条日志从这里发
+		})
+		return
+	}
+	term, _ := r.RaftLog.Term(m.Index)
+	if term != m.LogTerm {
+		// prevLogIndex 处 term 不匹配，拒绝
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgAppendResponse,
+			To:      m.From,
+			From:    r.id,
+			Term:    r.Term,
+			Reject:  true,
+		})
+		return
+	}
+
+	// 2、冲突解决 & 追加
+	for _, e := range m.Entries {
+		if e.Index <= r.RaftLog.LastIndex() {
+			// 若这个 index 本地已有，就比较 term
+			localTerm, _ := r.RaftLog.Term(e.Index)
+			if localTerm != e.Term {
+				// 冲突！从这里截断
+				firstIndex := r.RaftLog.entries[0].Index
+				r.RaftLog.entries = r.RaftLog.entries[:e.Index-firstIndex]
+				r.RaftLog.entries = append(r.RaftLog.entries, *e)
+			}
+			// term 一样说明已经存在，这里不是冲突位置，直接跳过
+		} else {
+			// 多出来的新日志，直接追加
+			r.RaftLog.entries = append(r.RaftLog.entries, *e)
+		}
+	}
+
+	// 3、更新 commit（Leader若commit更大，那就要更新）
+	lastNewIndex := r.RaftLog.LastIndex()
+	if m.Commit > r.RaftLog.committed {
+		r.RaftLog.committed = min(m.Commit, lastNewIndex)
+	}
+
+	// 4、回复日志成功
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		To:      m.From,
+		From:    r.id,
+		Term:    r.Term,
+		Reject:  false,
+		Index:   lastNewIndex,
+	})
 }
 
 // handleHeartbeat handle Heartbeat RPC request

@@ -136,11 +136,12 @@ pb.Message {
     From     // 谁发的（节点 ID）
     Term     // 发送者的当前任期
 
-    // MsgAppend 时=prevLogTerm；
+    // MsgAppend 时=prevLogTerm；即Follower已经确认收到的最后一条index，用于接收时确认一致；
 	// MsgRequestVote 时=candidate 最后一条日志的 term
 	LogTerm  
+
     // MsgAppend 时=prevLogIndex；
-    // MsgRequestVote 时=candidate 最后一条日志的 index
+    // MsgRequestVote 时=candidate最后一条日志的index
     Index   
 
     Entries  // 携带的日志条目（MsgAppend 用）
@@ -177,3 +178,35 @@ pb.Message {
 
 * Candidate 收到`相同term`的`心跳、MsgAppend` → 说明Leader 已存在，退位成为 Follower 再处理；若收到的是`相同term`的`MsgRequestVote`，则根据日志比较新旧，再决定是否退位（**注意：**若日志一样新，则继续竞争，防止一直退位导致无Leader）。
 * Leader 收到`相同term`的`心跳、MsgAppend` → 另一个 Leader 在发日志和心跳，直接退位成为Follower再处理。
+
+### （9）ab：`handleAppendEntries` —— Follower 端日志复制处理
+
+`handleAppendEntries` 是 Follower 收到 Leader 的 `MsgAppend` 后的核心处理函数，主要三部分：
+
+#### 一致性检查（prevLogIndex 处 term 是否匹配）
+
+Leader 在消息中带了 `Index`（prevLogIndex）和 `LogTerm`（prevLogTerm），表示"我日志里紧挨着要发的这一批日志之前的那一条在哪个位置、term 是什么"。Follower 检查自己这个位置的 term 是否一致：
+
+- **Index 超出 Follower 日志末尾**：Follower 日志比 Leader 短，无法做一致性检查。拒绝，回复 `Reject: true, Index: LastIndex()+1`，告诉 Leader"从这里发"。
+- **Index 处 term 不匹配**：同一个 index 但 term 不同，说明此前某处已经分叉。拒绝，Leader 会把 `Next` 减 1 往前回溯。
+
+两种情况本质上都是告诉 Leader"你说的位置对不上，往前找"。
+
+#### 冲突解决 & 追加
+
+一致性检查通过后，逐条扫描 Leader 发来的 entries：
+
+- **index 已存在 + term 相同** → 跳过（已存在，不需要重复）
+- **index 已存在 + term 不同** → 冲突。从这里一刀切掉本地该 index 及之后所有日志，用 Leader 的版本覆盖。截断时用 `entries[0].Index` 作为基准换算切片下标（因为 entries 开头可能已被 compact，不能直接用 `e.Index - 1`）
+- **index 不存在** → 新日志，直接追加
+
+#### 更新 commit
+
+Leader 在 `m.Commit` 里告诉 Follower"集群已共识到 index=X"。Follower 不能直接用这个值，因为 Leader 的 commit 可能超过 Follower 自己日志的末尾：
+
+```go
+r.RaftLog.committed = min(m.Commit, lastNewIndex)
+```
+
+- `m.Commit > lastNewIndex` → 取 `lastNewIndex`，不能提交还不存在的日志
+- `m.Commit <= r.RaftLog.committed` → 不动，commit 只能前进不能后退。这种情况只可能发生在旧消息乱序到达时，直接忽略即可
