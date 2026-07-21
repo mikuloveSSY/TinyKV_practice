@@ -48,15 +48,15 @@ Raft 结构体 13 个字段按初始化方式分成两拨：
 
 **`newRaft()` 直接设的**（有明确来源——Config 或硬盘）：
 
-| 字段                 | 含义                                                                                                                 | 来源                               |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `id`               | 节点编号                                                                                                             | `Config.ID`                      |
-| `Term`             | 当前任期，区分新旧 Leader                                                                                            | `HardState` 从硬盘恢复           |
-| `RaftLog`          | entries + 三个指针                                                                                                   | `newLog(storage)` 从硬盘恢复日志 |
-| `Prs`              | **作为Leader时**，记录每一个结点：已经收到的最新日志的编号和下一个需要接收的日志编号                           | `Config.peers` 遍历              |
-| electionTimeoutBase  | 用于超时时限随机化的**基准值**                                                                                      | `Config.ElectionTick`            |
-| `electionTimeout`  | **超时时限**。距离上次接收到心跳的时间超过了它就发起选举（*随机是为了防止所有节点同时超时从而整个Raft卡死*） | `Config.ElectionTick + 随机`     |
-| `heartbeatTimeout` | **心跳时限**。作为Leader时隔多久发一次心跳                                                                     | `Config.HeartbeatTick`           |
+| 字段                    | 含义                                                                                                                 | 来源                               |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `id`                  | 节点编号                                                                                                             | `Config.ID`                      |
+| `Term`                | 当前任期，区分新旧 Leader                                                                                            | `HardState` 从硬盘恢复           |
+| `RaftLog`             | entries + 三个指针                                                                                                   | `newLog(storage)` 从硬盘恢复日志 |
+| `Prs`                 | **作为Leader时**，记录每一个结点：已经收到的最新日志的编号和下一个需要接收的日志编号                           | `Config.peers` 遍历              |
+| `electionTimeoutBase` | 用于超时时限随机化的**基准值**                                                                                 | `Config.ElectionTick`            |
+| `electionTimeout`     | **超时时限**。距离上次接收到心跳的时间超过了它就发起选举（*随机是为了防止所有节点同时超时从而整个Raft卡死*） | `Config.ElectionTick + 随机`     |
+| `heartbeatTimeout`    | **心跳时限**。作为Leader时隔多久发一次心跳                                                                     | `Config.HeartbeatTick`           |
 
 **注意**：`electionTimeout`需要在每次becomeXXX的时候都随机化
 
