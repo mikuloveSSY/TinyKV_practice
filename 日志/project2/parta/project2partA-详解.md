@@ -153,11 +153,11 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 
 1. 重置 `r.State = StateCandidate`
 2. `r.Term++`（开始新一轮选举）
-4. `r.Lead = None`
-3. `r.Vote = r.id`（投票给自己）
-7. 初始化 `r.votes = map[uint64]bool{r.id: true}`（自己先投一票）
-5. 重置 `r.electionElapsed = 0`
-6. 重置 `r.heartbeatElapsed = 0`
+3. `r.Lead = None`
+4. `r.Vote = r.id`（投票给自己）
+5. 初始化 `r.votes = map[uint64]bool{r.id: true}`（自己先投一票）
+6. 重置 `r.electionElapsed = 0`
+7. 重置 `r.heartbeatElapsed = 0`
 8. 将 `r.tickFn` 函数设为 `tickElection`
 9. 如果只剩一个节点（`len(r.Prs) == 1`），直接调用 `becomeLeader()`
 
@@ -165,12 +165,12 @@ RaftLog 是日志管理器，即使选举阶段不涉及日志复制，也需要
 
 1. 重置 `r.State = StateLeader`
 2. `r.Lead = r.id`
-5. 清空 `r.votes`
-3. 重置 `r.electionElapsed = 0`
-4. 重置 `r.heartbeatElapsed = 0`
+3. 清空 `r.votes`
+4. 重置 `r.electionElapsed = 0`
+5. 重置 `r.heartbeatElapsed = 0`
 6. 将 `r.tickFn` 函数设为 `tickHeartbeat`
 7. 重置所有 peer 的 `Progress`：`Match = 0`，`Next = r.RaftLog.LastIndex() + 1`
-8. **追加 noop entry**：构造一条 `Entry{Term: r.Term, Index: r.RaftLog.LastIndex() + 1}`，追加到 `r.RaftLog.entries`。更新 `Prs[r.id].Match` 和 `Prs[r.id].Next`
+8. **（等阶段二日志相关函数完成在增加这个）追加 noop entry**：构造一条 `Entry{Term: r.Term, Index: r.RaftLog.LastIndex() + 1}`，追加到 `r.RaftLog.entries`。更新 `Prs[r.id].Match` 和 `Prs[r.id].Next`
 
 > **noop entry 是测试强制要求的**。`TestLeaderElection2AA` 等测试会检查新 leader 是否追加了 noop entry。这是 Raft 论文第 8 节的规则。
 
@@ -213,6 +213,8 @@ func (r *Raft) tick() {
 #### 第四步：`Step(m pb.Message)` —— 消息分发入口
 
 `Step()` 是消息处理的入口，按当前角色将消息路由到不同的处理方法：
+
+（也可以不分开，直接写在switch-case语句内）
 
 ```go
 func (r *Raft) Step(m pb.Message) error {
@@ -475,14 +477,14 @@ make project2a   # 一次性跑全部 Part A
 
 ### 阶段 1（2AA）：Leader 选举
 
-- [ ] `log.go`：`newLog()` 从 Storage 恢复状态
-- [ ] `log.go`：`LastIndex()` 返回最后 entry 的 index
-- [ ] `log.go`：`Term(i)` 查指定 index 的 term
-- [ ] `raft.go`：`newRaft()` 初始化所有字段，包括 peers、Prs、角色
-- [ ] `raft.go`：`becomeFollower()` 重置状态
-- [ ] `raft.go`：`becomeCandidate()` term++，投票给自己
-- [ ] `raft.go`：`becomeLeader()` 初始化 Prs，追加 noop entry
-- [ ] `raft.go`：`tick()` 驱动 `tickElection` / `tickHeartbeat`
+- [X] `log.go`：`newLog()` 从 Storage 恢复状态
+- [X] `log.go`：`LastIndex()` 返回最后 entry 的 index
+- [X] `log.go`：`Term(i)` 查指定 index 的 term
+- [X] `raft.go`：`newRaft()` 初始化所有字段，包括 peers、Prs、角色
+- [X] `raft.go`：`becomeFollower()` 重置状态
+- [X] `raft.go`：`becomeCandidate()` term++，投票给自己
+- [X] `raft.go`：`becomeLeader()` 初始化 Prs，追加 noop entry
+- [X] `raft.go`：`tick()` 驱动 `tickElection` / `tickHeartbeat`
 - [ ] `raft.go`：`Step()` term 检查 + 角色路由
 - [ ] `raft.go`：处理 `MsgHup` → 发起选举
 - [ ] `raft.go`：处理 `MsgRequestVote` → 投票逻辑
