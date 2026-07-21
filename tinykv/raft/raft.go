@@ -17,6 +17,7 @@ package raft
 import (
 	"errors"
 	"math/rand"
+	"sort"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -317,6 +318,7 @@ func (r *Raft) becomeLeader() {
 	// 因为增加了新日志，所以要更新一下prs里的自己的progress
 	r.Prs[r.id].Match = noop.Index
 	r.Prs[r.id].Next = noop.Index + 1
+	// 分发空日志更新Follower结点状态
 	for id := range r.Prs {
 		if id != r.id {
 			r.sendAppend(id)
@@ -410,7 +412,7 @@ func (r *Raft) stepFollower(m pb.Message) error {
 	case pb.MessageType_MsgAppend:
 		r.electionElapsed = 0
 		r.Lead = m.From
-		//
+		r.handleAppendEntries(m)
 
 	}
 	return nil
@@ -482,8 +484,7 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 
 	case pb.MessageType_MsgAppend:
 		r.becomeFollower(m.Term, m.From)
-		// 既然能收到相同的term的日志复制消息，选择退位
-		// 阶段 2 才继续处理日志复制
+		// 这里的测试不考虑
 	}
 	return nil
 }
@@ -512,15 +513,70 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		r.handleHeartbeat(m)
 
 	case pb.MessageType_MsgHeartbeatResponse:
-		// 收到心跳回复，确认 Follower 还活着，阶段 2 才会用这个更新 Progress
+		// 收到心跳回复，确认 Follower 还活着
+		// 如果这个Follower落后，则补发日志
+		if r.Prs[m.From].Next <= r.RaftLog.LastIndex() {
+			r.sendAppend(m.From)
+		}
 
 	case pb.MessageType_MsgPropose:
-		// 阶段 2
+		// 把提案的 entries 追加到自己的日志
+		lastIndex := r.RaftLog.LastIndex()
+		for _, e := range m.Entries {
+			e.Term = r.Term
+			e.Index = lastIndex + 1
+			lastIndex = e.Index
+			r.RaftLog.entries = append(r.RaftLog.entries, *e)
+		}
+		// 更新自己的 Progress
+		r.Prs[r.id].Match = r.RaftLog.LastIndex()
+		r.Prs[r.id].Next = r.Prs[r.id].Match + 1
+		// 广播给所有 Follower
+		for id := range r.Prs {
+			if id != r.id {
+				r.sendAppend(id)
+			}
+		}
+
+	case pb.MessageType_MsgAppendResponse:
+		if m.Reject {
+			// Follower拒绝 → Prs里对应结点记录的Next减1往回找一致点
+			r.Prs[m.From].Next--
+			r.sendAppend(m.From)
+		} else {
+			// Follower 接受 → 更新 Match 和 Next
+			r.Prs[m.From].Match = m.Index
+			r.Prs[m.From].Next = m.Index + 1
+			// 尝试推进 commit
+			// 收集Prs里所有Match，取中位数
+			// 因为中位数说明已经有半数结点认同了的
+			matches := make([]uint64, 0, len(r.Prs))
+			for _, pr := range r.Prs {
+				matches = append(matches, pr.Match)
+			}
+			sort.Slice(matches, func(i, j int) bool { return matches[i] < matches[j] })
+			newCommit := matches[len(matches)/2]
+			// 大于记录的commit时准备提交
+			if newCommit > r.RaftLog.committed {
+				term, _ := r.RaftLog.Term(newCommit)
+				// 只有当前 term 的 entry 才能通过计数提交
+				// 这个规则必须遵守
+				if term == r.Term {
+					r.RaftLog.committed = newCommit
+					// 广播新的 commit 给所有人
+					for id := range r.Prs {
+						if id != r.id {
+							r.sendAppend(id)
+						}
+					}
+				}
+			}
+		}
 
 	case pb.MessageType_MsgAppend:
-		r.becomeFollower(m.Term, m.From)
 		// 既然能收到相同的term的日志复制消息，选择退位
-		// 阶段 2 才继续处理日志复制
+		r.becomeFollower(m.Term, m.From)
+		r.handleAppendEntries(m)
 	}
 	return nil
 }

@@ -210,3 +210,20 @@ r.RaftLog.committed = min(m.Commit, lastNewIndex)
 
 - `m.Commit > lastNewIndex` → 取 `lastNewIndex`，不能提交还不存在的日志
 - `m.Commit <= r.RaftLog.committed` → 不动，commit 只能前进不能后退。这种情况只可能发生在旧消息乱序到达时，直接忽略即可
+
+### （10）ab：Leader 端的 `MsgPropose` 与 `MsgAppendResponse` —— 数据入口与提交通道
+
+**`MsgPropose` —— 外部数据入口**
+
+`MsgPropose` 来自上层应用（通过 `RawNode.Propose()`），是数据进入 Raft 的唯一入口。上层传过来的 entry 只有 Data，Leader 补上当前 term 和下一个可用的 index，追加到自己的日志。然后更新 `Prs[self]`（数"过半"时 Leader 自己算一票），最后广播 `sendAppend` 给所有 Follower 开始复制。
+
+**`MsgAppendResponse` —— 复制进度反馈**
+
+Follower 处理完 `MsgAppend` 后回复，Leader 根据结果分两种情况：
+
+- **拒绝（`Reject: true`）**：prevLogIndex 处对不上。Leader 把该 Follower 的 `Next` 减 1，往前回溯，重试 `sendAppend`。每次只退一格，保守地逐步找到一致性起点。
+- **接受（`Reject: false`）**：更新该 Follower 的 `Match` 和 `Next`，然后**尝试推进 commit**：
+  1. 收集所有节点（包括自己）的 `Match`，排序取中位数。中位数的位置刚好是 `ceil(N/2)`，即多数节点都达到的 index
+  2. 检查中位数处 entry 的 term **是否等于当前 term**
+  3. 等于 → `committed = newCommit`，广播 `sendAppend` 通知所有人
+  4. 不等于 → **不动**。**这是 Raft 5.4.2 的核心规则：旧 term 的 entry 即使过半也不能通过计数提交，必须靠当前 term 的 noop 复制过半后间接带上去！**
